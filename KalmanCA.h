@@ -53,20 +53,25 @@ public:
     double alphaAz() const { return x1_[AZ]; }
     double alphaEl() const { return x1_[EL]; }
 
-    // Ileri tahmin. Ufuk (H) her cagride, o eksenin son predictAhead
-    // cagrisindan bu yana gecen sure olarak filtre icinde olculur
-    // (bir sonraki aralik oncekine esittir varsayimi). Ilk cagri mevcut
-    // tahmini (H=0) dondurur. Kendi zaman damgasini gunceller -> const degil.
+    // Ileri tahmin (olu-hesap / dead reckoning). Ufuk (H) SON OLCUM anindan
+    // (son update) bu yana gecen sure olarak filtre icinde olculur:
+    //     H = simdi - lastUpdateSec_ ,   w(now) = w + a*H
+    // Sensor kesildiginde H zamanla buyur -> cikti zamana bagli ilerler.
+    // Olcum her adimda geliyorsa H~0 -> mevcut hiz. Kendi zaman damgasini
+    // (lastHorizon_) yazar -> const degil.
     double predictAheadAz() { return predictAheadAz(nowSec()); }
     double predictAheadEl() { return predictAheadEl(nowSec()); }
-    // Kendi zaman damganizla (test / harici saat):
+    // Kendi zaman damganizla (test / harici saat / sensor zaman damgasi):
     double predictAheadAz(double tSec);
     double predictAheadEl(double tSec);
 
-    // Son predictAhead cagrisinin ufkundaki 1-sigma belirsizlik (deg/s).
-    // Once ilgili predictAhead* cagrilmalidir.
+    // Son predictAhead ufkundaki 1-sigma belirsizlik (deg/s). Kesinti boyunca
+    // surec gurultusu (Q) birikerek buyur. Once ilgili predictAhead* cagrilir.
     double predictAheadStdAz() const { return predictAheadStd(AZ, lastHorizon_[AZ]); }
     double predictAheadStdEl() const { return predictAheadStd(EL, lastHorizon_[EL]); }
+
+    // En son olcumden bu yana gecen sure (s). Kesinti (bayatlik) olcusu.
+    double timeSinceUpdate() const { return init_ ? (nowSec() - lastUpdateSec_) : 0.0; }
 
     double lastDt() const { return lastDt_; }   // son update adiminin dt'si (s)
 
@@ -77,8 +82,6 @@ public:
         for (int i = 0; i < 2; ++i) {
             x0_[i] = x1_[i] = 0.0;
             p00_[i] = p01_[i] = p11_[i] = 0.0;
-            aheadStarted_[i] = false;
-            lastAheadSec_[i] = 0.0;
             lastHorizon_[i]  = 0.0;
         }
         lastUpdateSec_ = 0.0;
@@ -96,7 +99,6 @@ private:
 
     void   updateAt(double zAz, double zEl, double tSec);
     void   predictStep(double dt);                      // durumu dt kadar ilerlet
-    double aheadHorizon(int axis, double tSec);         // ufku olc + zaman damgasini guncelle
     double predictAheadStd(int axis, double H) const;   // 1-sigma (deg/s)
 
     double q_, r_;
@@ -106,8 +108,6 @@ private:
 
     double lastUpdateSec_;            // son update zaman damgasi (s)
     double lastDt_;                   // son update adiminin dt'si (s)
-    double lastAheadSec_[2];          // eksen basina son predictAhead zamani (s)
-    bool   aheadStarted_[2];          // predictAhead ilk cagri korumasi
     double lastHorizon_[2];           // eksen basina son kullanilan ufuk (std icin)
 };
 

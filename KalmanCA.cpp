@@ -12,7 +12,6 @@ KalmanCA::KalmanCA(double qJerk, double rMeas)
       x0_{0.0, 0.0}, x1_{0.0, 0.0},
       p00_{0.0, 0.0}, p01_{0.0, 0.0}, p11_{0.0, 0.0},
       lastUpdateSec_(0.0), lastDt_(0.0),
-      lastAheadSec_{0.0, 0.0}, aheadStarted_{false, false},
       lastHorizon_{0.0, 0.0} {}
 
 // Durumu dt kadar ileri tasi:  x = F x ,  P = F P F^T + Q
@@ -84,34 +83,31 @@ void KalmanCA::updateAt(double zAz, double zEl, double tSec) {
     }
 }
 
-// Ufuk = bu eksenin son predictAhead cagrisindan bu yana gecen sure.
-double KalmanCA::aheadHorizon(int axis, double tSec) {
-    double H;
-    if (!aheadStarted_[axis]) {            // ilk cagri: onceki zaman yok
-        H = 0.0;
-        aheadStarted_[axis] = true;
-    } else {
-        H = tSec - lastAheadSec_[axis];
-        if (H < 0.0) H = 0.0;
-    }
-    lastAheadSec_[axis] = tSec;
-    lastHorizon_[axis]  = H;
-    return H;
-}
-
+// Ufuk = SON OLCUM anindan (lastUpdateSec_) bu yana gecen sure.
+// Sensor kesildiginde bu sure buyur -> cikti zamana bagli olu-hesap yapar.
 double KalmanCA::predictAheadAz(double tSec) {
-    const double H = aheadHorizon(AZ, tSec);
-    return x0_[AZ] + x1_[AZ] * H;          // w(t+H) = w + a*H
+    if (!init_) { lastHorizon_[AZ] = 0.0; return 0.0; }
+    double H = tSec - lastUpdateSec_;
+    if (H < 0.0) H = 0.0;
+    lastHorizon_[AZ] = H;
+    return x0_[AZ] + x1_[AZ] * H;          // w(now) = w + a*H
 }
 
 double KalmanCA::predictAheadEl(double tSec) {
-    const double H = aheadHorizon(EL, tSec);
-    return x0_[EL] + x1_[EL] * H;          // w(t+H) = w + a*H
+    if (!init_) { lastHorizon_[EL] = 0.0; return 0.0; }
+    double H = tSec - lastUpdateSec_;
+    if (H < 0.0) H = 0.0;
+    lastHorizon_[EL] = H;
+    return x0_[EL] + x1_[EL] * H;          // w(now) = w + a*H
 }
 
 double KalmanCA::predictAheadStd(int axis, double H) const {
-    // var = [1 H] P [1 H]^T = p00 + 2 H p01 + H^2 p11
-    const double var = p00_[axis] + 2.0 * H * p01_[axis] + H * H * p11_[axis];
+    // P'nin H kadar ileri tasinmis hali:  P(H) = F(H) P F(H)^T + Q(H)
+    // var(w) = p00 + 2 H p01 + H^2 p11 + q*H^3/3
+    // Son terim (Q birikimi) kesinti uzadikca belirsizligin dogru sekilde
+    // buyumesini saglar.
+    const double var = p00_[axis] + 2.0 * H * p01_[axis] + H * H * p11_[axis]
+                     + q_ * H * H * H / 3.0;
     return var > 0.0 ? std::sqrt(var) : 0.0;
 }
 
