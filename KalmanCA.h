@@ -3,8 +3,12 @@
 //
 //  Acisal hiz tahmini icin Sabit-Ivme (Constant Acceleration, CA) Kalman
 //  filtresi -- 2 BOYUTLU: azimuth ve elevation eksenleri.
-//  Harici bagimlilik yok (Eigen vb. gerekmez); 2x2 islemler elle acilmistir
-//  -> embedded uygun.
+//  2x2 islemler elle acilmistir.  Tek harici baglilik: <chrono> (dahili
+//  zaman olcumu icin standart kutuphane).
+//
+//  DEGISKEN dt: adim periyodu sabit degildir; her cagride gecen sure
+//  filtre icinde saatten (steady_clock) olculur. Isterseniz olcumun kendi
+//  zaman damgasini (tSec) da verebilirsiniz (degisken-dt icin onerilir).
 //
 //  Iki eksen dinamik olarak bagimsizdir (capraz kuplaj yok); her eksende
 //  ayni CA modeli, ayni F/Q/R semasi ve ayni parametreler kullanilir.
@@ -12,12 +16,14 @@
 //  Durum :  x = [ w , a ]^T     w = acisal hiz (deg/s), a = acisal ivme (deg/s^2)
 //           her eksen (az, el) icin ayri
 //  Model :  w' = a ,  a' = beyaz gurultu (jerk)         (theta uzerinde CA)
-//           F = [ 1  dt ; 0  1 ]
+//           F = [ 1  dt ; 0  1 ]   (dt her adimda olculur)
 //  Olcum :  z = w                                       H = [ 1  0 ]
 //  Cikti :  w(t+H) = w + a*H                            (predictAhead)
 // ============================================================================
 #ifndef KALMANCA_H
 #define KALMANCA_H
+
+#include <chrono>
 
 namespace ptz {
 
@@ -26,14 +32,19 @@ public:
     // Eksen indeksleri (iceride dizi erisimi ve isteğe bagli genel API icin)
     enum Axis { AZ = 0, EL = 1 };
 
-    // dt     : adim periyodu (s)
     // qJerk  : surec gurultusu (jerk) spektral yogunlugu  [ (deg/s^2)^2 / s ]
     // rMeas  : omega olcum gurultu varyansi               [ (deg/s)^2 ]
-    KalmanCA(double dt, double qJerk, double rMeas);
+    // dt artik parametre DEGIL: her adimda gecen sure filtre icinde olculur.
+    KalmanCA(double qJerk, double rMeas);
 
-    void predict();                         // her iki eksen bir adim ileri (dt)
-    void update(double zAz, double zEl);    // olcum guncellemesi (z = w);
-                                            // ilk cagri filtreyi baslatir
+    // Olcum guncellemesi (z = w). dt = son update'ten bu yana gecen sure,
+    // saatten (steady_clock) olculur. Ilk cagri filtreyi baslatir (predict yok).
+    void update(double zAz, double zEl);
+
+    // Ayni guncelleme, ancak dt'yi cagiran verir: tSec = olcumun monoton
+    // artan zaman damgasi (saniye). Degisken-dt sistemlerde onerilen yol
+    // (sensor zaman damgasi, saat okumasindan daha isabetlidir).
+    void update(double zAz, double zEl, double tSec);
 
     // Tahmini acisal hiz (deg/s)
     double omegaAz() const { return x0_[AZ]; }
@@ -42,11 +53,22 @@ public:
     double alphaAz() const { return x1_[AZ]; }
     double alphaEl() const { return x1_[EL]; }
 
-    // H saniye ilerisi icin acisal hiz tahmini ve belirsizligi.
-    double predictAheadAz(double horizonSec) const { return x0_[AZ] + x1_[AZ] * horizonSec; }
-    double predictAheadEl(double horizonSec) const { return x0_[EL] + x1_[EL] * horizonSec; }
-    double predictAheadStdAz(double horizonSec) const { return predictAheadStd(AZ, horizonSec); }
-    double predictAheadStdEl(double horizonSec) const { return predictAheadStd(EL, horizonSec); }
+    // Ileri tahmin. Ufuk (H) her cagride, o eksenin son predictAhead
+    // cagrisindan bu yana gecen sure olarak filtre icinde olculur
+    // (bir sonraki aralik oncekine esittir varsayimi). Ilk cagri mevcut
+    // tahmini (H=0) dondurur. Kendi zaman damgasini gunceller -> const degil.
+    double predictAheadAz() { return predictAheadAz(nowSec()); }
+    double predictAheadEl() { return predictAheadEl(nowSec()); }
+    // Kendi zaman damganizla (test / harici saat):
+    double predictAheadAz(double tSec);
+    double predictAheadEl(double tSec);
+
+    // Son predictAhead cagrisinin ufkundaki 1-sigma belirsizlik (deg/s).
+    // Once ilgili predictAhead* cagrilmalidir.
+    double predictAheadStdAz() const { return predictAheadStd(AZ, lastHorizon_[AZ]); }
+    double predictAheadStdEl() const { return predictAheadStd(EL, lastHorizon_[EL]); }
+
+    double lastDt() const { return lastDt_; }   // son update adiminin dt'si (s)
 
     bool   isInitialized() const { return init_; }
 
@@ -55,19 +77,38 @@ public:
         for (int i = 0; i < 2; ++i) {
             x0_[i] = x1_[i] = 0.0;
             p00_[i] = p01_[i] = p11_[i] = 0.0;
+            aheadStarted_[i] = false;
+            lastAheadSec_[i] = 0.0;
+            lastHorizon_[i]  = 0.0;
         }
+        lastUpdateSec_ = 0.0;
+        lastDt_ = 0.0;
     }
 
     double getx0Az() const { return x0_[AZ]; }
     double getx0El() const { return x0_[EL]; }
 
 private:
+    typedef std::chrono::steady_clock Clock;
+    static double nowSec() {
+        return std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+    }
+
+    void   updateAt(double zAz, double zEl, double tSec);
+    void   predictStep(double dt);                      // durumu dt kadar ilerlet
+    double aheadHorizon(int axis, double tSec);         // ufku olc + zaman damgasini guncelle
     double predictAheadStd(int axis, double H) const;   // 1-sigma (deg/s)
 
-    double dt_, q_, r_;
+    double q_, r_;
     bool   init_;
     double x0_[2], x1_[2];            // [AZ, EL] :  w, a
     double p00_[2], p01_[2], p11_[2]; // [AZ, EL] :  simetrik kovaryans
+
+    double lastUpdateSec_;            // son update zaman damgasi (s)
+    double lastDt_;                   // son update adiminin dt'si (s)
+    double lastAheadSec_[2];          // eksen basina son predictAhead zamani (s)
+    bool   aheadStarted_[2];          // predictAhead ilk cagri korumasi
+    double lastHorizon_[2];           // eksen basina son kullanilan ufuk (std icin)
 };
 
 } // namespace ptz

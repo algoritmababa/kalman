@@ -1,30 +1,31 @@
 // ============================================================================
 //  kalmanca.cpp   (C++11)   --  2-durumlu CA Kalman filtresi (2 eksen: AZ, EL)
+//                               DEGISKEN dt: her adimda gecen sure olculur.
 // ============================================================================
 #include "KalmanCA.h"
 #include <cmath>
 
 namespace ptz {
 
-KalmanCA::KalmanCA(double dt, double qJerk, double rMeas)
-    : dt_(dt), q_(qJerk), r_(rMeas), init_(false),
+KalmanCA::KalmanCA(double qJerk, double rMeas)
+    : q_(qJerk), r_(rMeas), init_(false),
       x0_{0.0, 0.0}, x1_{0.0, 0.0},
-      p00_{0.0, 0.0}, p01_{0.0, 0.0}, p11_{0.0, 0.0} {}
+      p00_{0.0, 0.0}, p01_{0.0, 0.0}, p11_{0.0, 0.0},
+      lastUpdateSec_(0.0), lastDt_(0.0),
+      lastAheadSec_{0.0, 0.0}, aheadStarted_{false, false},
+      lastHorizon_{0.0, 0.0} {}
 
-void KalmanCA::predict() {
-    if (!init_) return;
-
-    const double dt = dt_;
-    // Q : beyaz-jerk CA surec gurultusu
+// Durumu dt kadar ileri tasi:  x = F x ,  P = F P F^T + Q
+void KalmanCA::predictStep(double dt) {
     const double dt2 = dt * dt, dt3 = dt2 * dt;
 
     for (int i = 0; i < 2; ++i) {          // AZ ve EL eksenleri
-        // Durum: x = F x ,  F = [1 dt ; 0 1]
+        // Durum: F = [1 dt ; 0 1]
         x0_[i] += dt * x1_[i];             // w += a*dt
         // x1_[i] degismez
 
-        // Kovaryans: P = F P F^T + Q
-        const double n00 = p00_[i] + 2.0 * dt * p01_[i] + dt * dt * p11_[i];
+        // Kovaryans: P = F P F^T + Q  (Q : beyaz-jerk CA surec gurultusu)
+        const double n00 = p00_[i] + 2.0 * dt * p01_[i] + dt2 * p11_[i];
         const double n01 = p01_[i] + dt * p11_[i];
         const double n11 = p11_[i];
 
@@ -32,9 +33,18 @@ void KalmanCA::predict() {
         p01_[i] = n01 + q_ * dt2 / 2.0;
         p11_[i] = n11 + q_ * dt;
     }
+    lastDt_ = dt;
 }
 
 void KalmanCA::update(double zAz, double zEl) {
+    updateAt(zAz, zEl, nowSec());
+}
+
+void KalmanCA::update(double zAz, double zEl, double tSec) {
+    updateAt(zAz, zEl, tSec);
+}
+
+void KalmanCA::updateAt(double zAz, double zEl, double tSec) {
     const double z[2] = { zAz, zEl };
 
     if (!init_) {
@@ -43,10 +53,19 @@ void KalmanCA::update(double zAz, double zEl) {
             x0_[i]  = z[i];  x1_[i] = 0.0;
             p00_[i] = r_;    p01_[i] = 0.0;  p11_[i] = 1.0e3;
         }
+        lastUpdateSec_ = tSec;
+        lastDt_ = 0.0;
         init_ = true;
         return;
     }
 
+    // dt = son update'ten bu yana gecen sure (filtre icinde hesaplanir).
+    double dt = tSec - lastUpdateSec_;
+    lastUpdateSec_ = tSec;
+    if (dt < 0.0) dt = 0.0;                // monoton olmayan zaman damgasina karsi koruma
+    predictStep(dt);
+
+    // Olcum duzeltmesi
     for (int i = 0; i < 2; ++i) {          // AZ ve EL eksenleri
         // S = H P H^T + R = p00 + r   (H = [1 0])
         const double S  = p00_[i] + r_;
@@ -63,6 +82,31 @@ void KalmanCA::update(double zAz, double zEl) {
         p01_[i] = (1.0 - K0) * p01;
         p11_[i] = p11 - K1 * p01;
     }
+}
+
+// Ufuk = bu eksenin son predictAhead cagrisindan bu yana gecen sure.
+double KalmanCA::aheadHorizon(int axis, double tSec) {
+    double H;
+    if (!aheadStarted_[axis]) {            // ilk cagri: onceki zaman yok
+        H = 0.0;
+        aheadStarted_[axis] = true;
+    } else {
+        H = tSec - lastAheadSec_[axis];
+        if (H < 0.0) H = 0.0;
+    }
+    lastAheadSec_[axis] = tSec;
+    lastHorizon_[axis]  = H;
+    return H;
+}
+
+double KalmanCA::predictAheadAz(double tSec) {
+    const double H = aheadHorizon(AZ, tSec);
+    return x0_[AZ] + x1_[AZ] * H;          // w(t+H) = w + a*H
+}
+
+double KalmanCA::predictAheadEl(double tSec) {
+    const double H = aheadHorizon(EL, tSec);
+    return x0_[EL] + x1_[EL] * H;          // w(t+H) = w + a*H
 }
 
 double KalmanCA::predictAheadStd(int axis, double H) const {
